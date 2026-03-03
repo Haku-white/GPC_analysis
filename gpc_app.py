@@ -323,6 +323,11 @@ if True:
         tick_interval = st.sidebar.number_input("横軸メモリの間隔", min_value=0.1, max_value=10.0, value=1.0, step=1.0, key="ui_tick_interval")
 
         st.sidebar.divider()
+        st.sidebar.subheader("フォント設定")
+        axis_title_font_size = st.sidebar.number_input("軸タイトルの文字サイズ", min_value=10, max_value=40, value=20, step=1, key="ui_title_font")
+        axis_tick_font_size = st.sidebar.number_input("軸ラベル(数値)の文字サイズ", min_value=10, max_value=40, value=18, step=1, key="ui_tick_font")
+
+        st.sidebar.divider()
         show_yaxis = st.sidebar.checkbox("縦軸（強度数値）を表示", value=False, key="ui_show_yaxis")
 
         st.sidebar.subheader("凡例の設定")
@@ -363,6 +368,11 @@ if True:
         st.sidebar.divider()
         st.sidebar.header("💾 保存設定")
         img_format = st.sidebar.radio("カメラアイコンでの保存形式", ["svg", "png"], index=0, key="ui_img_format")
+        col_w, col_h = st.sidebar.columns(2)
+        with col_w:
+            export_width = st.number_input("出力幅 (px)", min_value=200, max_value=3000, value=500, step=50, key="ui_export_width")
+        with col_h:
+            export_height = st.number_input("出力高さ (px)", min_value=200, max_value=3000, value=320, step=50, key="ui_export_height")
 
         st.sidebar.divider()
         st.sidebar.header("⚙ 各データの設定 (色・Y軸オフセット)")
@@ -432,14 +442,45 @@ if True:
             # 見えている範囲におけるグラフの最大値と最小値の差が等しくなるように標準化 (0 ~ 1)
             df = normalize_data(df, float(x_range_min), float(x_range_max))
 
-            # SVGエクスポート等のベクター形式で、領域（枠線）の外まで線が長く飛び出すのを防ぐため
-            # 表示範囲の「わずかに外側」でデータを物理的にカットする
+            # SVGエクスポート時に横軸外へ線がはみ出すのを防ぐため、
+            # x_range_min / x_range_max で線形補間した端点を追加した上で、
+            # 範囲外のデータを物理的に除去する。
             x_min_val = float(x_range_min)
             x_max_val = float(x_range_max)
-            margin = (x_max_val - x_min_val) * 0.05
 
-            plot_mask = (df["Retention time [min]"] >= x_min_val - margin) & (df["Retention time [min]"] <= x_max_val + margin)
-            df_plot = df[plot_mask]
+            df_sorted = df.sort_values("Retention time [min]").reset_index(drop=True)
+            x_col = df_sorted["Retention time [min]"]
+            y_col = df_sorted["Intensity_Norm"]
+
+            def interp_boundary(x_col, y_col, x_bound, side):
+                """境界x_boundでy値を線形補間してDataFrameの行として返す。
+                side='left': x_bound より右のデータの直前点を使う
+                side='right': x_bound より左のデータの直後点を使う"""
+                if side == 'left':
+                    idx_after = x_col.searchsorted(x_bound, side='right')
+                    if idx_after == 0 or idx_after >= len(x_col):
+                        return None
+                    x0, x1 = x_col.iloc[idx_after - 1], x_col.iloc[idx_after]
+                    y0, y1 = y_col.iloc[idx_after - 1], y_col.iloc[idx_after]
+                else:  # right
+                    idx_before = x_col.searchsorted(x_bound, side='left') - 1
+                    if idx_before < 0 or idx_before + 1 >= len(x_col):
+                        return None
+                    x0, x1 = x_col.iloc[idx_before], x_col.iloc[idx_before + 1]
+                    y0, y1 = y_col.iloc[idx_before], y_col.iloc[idx_before + 1]
+                if x1 == x0:
+                    return None
+                y_interp = y0 + (y1 - y0) * (x_bound - x0) / (x1 - x0)
+                return pd.DataFrame({"Retention time [min]": [x_bound], "Intensity_Norm": [y_interp]})
+
+            left_pt = interp_boundary(x_col, y_col, x_min_val, 'left')
+            right_pt = interp_boundary(x_col, y_col, x_max_val, 'right')
+
+            plot_mask = (df_sorted["Retention time [min]"] >= x_min_val) & (df_sorted["Retention time [min]"] <= x_max_val)
+            df_inner = df_sorted[plot_mask]
+
+            parts = [p for p in [left_pt, df_inner, right_pt] if p is not None and not p.empty]
+            df_plot = pd.concat(parts, ignore_index=True).sort_values("Retention time [min]").reset_index(drop=True)
 
             x_data = df_plot["Retention time [min]"]
             y_data = df_plot["Intensity_Norm"] + settings['y_offset']
@@ -461,7 +502,7 @@ if True:
                 mode='lines',
                 line_shape='spline',
                 name=mapped_series_name,
-                line=dict(color=settings['color'], width=2.0),
+                line=dict(color=settings['color'], width=2.5),
                 cliponaxis=True  # 領域外（SVGエクスポート時など）をクリッピング
             ))
 
@@ -477,15 +518,25 @@ if True:
             global_y_min = 0.0
             global_y_max = 1.0
 
+        # グラフと横軸の距離をもう少し長くするため、下側に0.05の余裕を持たせる。上側には0.05の余裕を持たせる。
+        y_range_pad_top = (global_y_max - global_y_min) * 0.05
+        y_range_pad_bottom = (global_y_max - global_y_min) * 0.05
+        if y_range_pad_top == 0:
+            y_range_pad_top = 0.1
+            y_range_pad_bottom = 0.02
+
+        y_axis_min = global_y_min - y_range_pad_bottom
+        y_axis_max = global_y_max + y_range_pad_top
+
         for trace in traces_to_add:
             fig.add_trace(trace)
 
         for shape in shapes_to_add:
-            # y0 を global_y_min に固定する。下のfig.update_yaxesでrange下端をglobal_y_minに合わせているため横軸とピッタリ合う
+            # ピークラインのy0はグラフ下端ではなく設定されたY軸最小値に合わせることで横軸にピッタリ付く
             fig.add_shape(
                 type="line",
                 x0=shape['x'], x1=shape['x'],
-                y0=global_y_min, y1=shape['y'],
+                y0=y_axis_min, y1=shape['y'],
                 yref="y", xref="x",
                 line=dict(width=1.5, dash=shape['dash'], color=shape['color']),
                 opacity=0.8
@@ -530,9 +581,6 @@ if True:
                 font=dict(size=ann['font_size'], color=ann['color'])
             )
 
-        # Plotlyで両端のメモリが切れないように描画範囲(range)を広げる
-        range_padding = (x_range_max - x_range_min) * 0.01
-
         # 横軸のメモリ配列の計算
         x_ticks = np.arange(x_range_min, x_range_max + (tick_interval/1000), tick_interval)
 
@@ -540,7 +588,7 @@ if True:
         x_tick_texts = [f"<b>{val:g}</b>" for val in x_ticks]
 
         fig.update_xaxes(
-            range=[x_range_min - range_padding, x_range_max + range_padding], # わずかに広げて両端メモリを保証
+            range=[x_range_min, x_range_max], # 両端でぴったりクリッピングする
             tickmode='array',
             tickvals=x_ticks,
             ticktext=x_tick_texts,
@@ -549,11 +597,13 @@ if True:
             tickwidth=2.5,
             ticklen=8,
             title_text="<b>Retention time [min]</b>",
-            title_font=dict(size=15, color='black'),
-            tickfont=dict(size=15, color='black'),
+            title_font=dict(size=axis_title_font_size, color='black'),
+            title_standoff=12,
+            tickfont=dict(size=axis_tick_font_size, color='black'),
+            automargin=True,
             showline=True,
             linecolor='black',
-            linewidth=2.5,
+            linewidth=3.5,
             showgrid=show_grid,
             gridwidth=1,
             gridcolor='#e0e0e0',
@@ -561,12 +611,8 @@ if True:
             zeroline=False
         )
 
-        # 下にはpaddingを持たせずぴったりに、上だけ余裕(0.05分)を持たせることで y=global_y_min が横軸ラインになる
-        y_range_pad = (global_y_max - global_y_min) * 0.05
-        if y_range_pad == 0: y_range_pad = 0.1
-
         fig.update_yaxes(
-            range=[global_y_min, global_y_max + y_range_pad],
+            range=[y_axis_min, y_axis_max],
             showticklabels=show_yaxis,
             title_text="" if not show_yaxis else "<b>Normalized Intensity</b>",
             showline=show_border,
@@ -582,13 +628,22 @@ if True:
         # Tracesを枠線にクリップ
         fig.update_traces(cliponaxis=True)
 
+        # 保存用ファイル名のベースを生成
+        if len(data_dict) == 1:
+            series_info_base = list(data_dict.values())[0]['series_name']
+        else:
+            series_names_list = [v['series_name'] for v in data_dict.values()]
+            series_info_base = "_".join(series_names_list[:3])
+            if len(series_names_list) > 3:
+                series_info_base += "_etc"
+
         # PNGとSVGの両方でダウンロードできるようにPlotlyのconfigを設定
         config = {
             'toImageButtonOptions': {
                 'format': img_format,         # サイドバーで選択された形式
-                'filename': 'gpc_plot',
-                'height': 600,
-                'width': 1000,
+                'filename': series_info_base,
+                'height': export_height,
+                'width': export_width,
                 'scale': 1
             },
             'edits': {
