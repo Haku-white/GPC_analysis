@@ -658,6 +658,24 @@ if True:
         # Plotlyチャートを描画
         st.plotly_chart(fig, use_container_width=True, config=config)
 
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🖼️ コピー用画像を表示 (右クリックでコピーできます)", use_container_width=True):
+            with st.spinner("画像を生成中..."):
+                try:
+                    # pngとして高画質(scale=3)で画像データを取得
+                    img_bytes = fig.to_image(format="png", width=export_width, height=export_height, scale=3)
+                    st.success("✅ 画像の生成が完了しました！下の画像を **右クリックして「画像をコピー」** を選択してください。")
+
+                    # コンテナの幅に合わせて画像を表示
+                    st.image(img_bytes, use_container_width=True)
+
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "kaleido" in err_msg or "mathjax" in err_msg:
+                        st.error("⚠️ 画像の生成には 'kaleido' パッケージが必要です。ターミナルで `pip install -U kaleido` を実行してインストールしてください。")
+                    else:
+                        st.error(f"画像生成中にエラーが発生しました: {e}")
+
 # プロジェクト保存用のダウンロードボタンをサイドバー最下部に配置
 if data_dict:
     st.sidebar.divider()
